@@ -1,6 +1,4 @@
-from pathlib import Path
-
-readme = r"""# Mini Militia Customized
+# Mini Militia Customized
 
 A personal customization project for the Android version of Mini Militia (Doodle Army 2), focused on redesigning the game's main-menu presentation, replacing visual assets, cleaning up selected UI elements, and automating the APK build/sign/install workflow.
 
