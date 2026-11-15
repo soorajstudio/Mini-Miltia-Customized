@@ -352,12 +352,27 @@ def patch_libcocos2dcpp(z):
     so[0x6E4158 : 0x6E4158 + len(bg_zorder_patch)] = bg_zorder_patch
     print("[+] Patched title_ret2 background to render at zOrder=-1 (behind all menu buttons).")
 
-    # 12. Remove the duplicate top-right standalone gear SETTINGS button
-    # In MenuLayer::init at 0x6e3c0c: blr x10 calls this->addChild(settingsBtn)
-    # NOPing out this call prevents the top-right button from ever being added to the scene,
-    # leaving ONLY the side menu 'SETTINGS' button with text.
-    so[0x6E3C0C : 0x6E3C10] = bytes([0x1F, 0x20, 0x03, 0xD5]) # nop
-    print("[+] Removed duplicate top-right standalone gear SETTINGS button.")
+    # 12. Custom Button UI Replacements:
+    # A) Point button icon strings to custom wood placard textures in menuTexture:
+    #    Button 1 -> b03_top.png (contains custom settings.png)
+    #    Button 2 -> b03_mid.png (contains custom avatars.png)
+    #    Button 3 -> b03_bot.png (contains custom play local.png)
+    so[0x6E2A3C : 0x6E2A44] = bytes([0x29, 0x4D, 0x00, 0x90, 0x29, 0x9D, 0x37, 0x91]) # adrp x9, 0x1086000; add x9, x9, 0xde7 (b03_top.png)
+    so[0x6E2BE4 : 0x6E2BEC] = bytes([0xE8, 0x4C, 0x00, 0xF0, 0x08, 0xFD, 0x36, 0x91]) # adrp x8, 0x1081000; add x8, x8, 0xdbf (b03_mid.png)
+    so[0x6E2D90 : 0x6E2D98] = bytes([0x28, 0x4D, 0x00, 0x90, 0x08, 0xCD, 0x37, 0x91]) # adrp x8, 0x1086000; add x8, x8, 0xdf3 (b03_bot.png)
+
+    # B) Hide duplicate text label by removing it from the CCMenu:
+    #    In createSpriteLabelMenuItem:
+    #    - 0x6E4E10-0x6E4E1C: NOP out setPosition call on label
+    #    - 0x6E4E24: mov x1, xzr -> CCMenu::create(menuItemSprite, NULL, NULL)
+    #    - 0x6E4E44: ldr x0, [sp, #0x130] -> store menuItemSprite as primary menuItem
+    so[0x6E4E10 : 0x6E4E20] = bytes([0x1F, 0x20, 0x03, 0xD5] * 4) # 4 x nop
+    so[0x6E4E24 : 0x6E4E28] = bytes([0xE1, 0x03, 0x1F, 0xAA])     # mov x1, xzr
+    so[0x6E4E44 : 0x6E4E48] = bytes([0xE0, 0x9B, 0x40, 0xF9])     # ldr x0, [sp, #0x130]
+
+    # C) Adjust vertical button spacing from 42.0 to 56.0 for clean visual separation
+    so[0x6E29B4 : 0x6E29B8] = bytes([0x08, 0x4C, 0xA8, 0x52])     # mov w8, #0x42600000 (56.0)
+    print("[+] Patched MenuLayer buttons to use custom wood UI frames without overlay text.")
 
     return {"lib/arm64-v8a/libcocos2dcpp.so": bytes(so)}
 
@@ -461,6 +476,36 @@ def repack_map_tiles(z, tile_name, png_path, individual_dir):
 
     return results
 
+# --- Custom Button Image Sources ---
+BUTTON_SETTINGS_SRC   = os.path.join(APP_DIR, "apk_images", "settings.png")
+BUTTON_AVATARS_SRC    = os.path.join(APP_DIR, "apk_images", "avatars.png")
+BUTTON_PLAY_LOCAL_SRC = os.path.join(APP_DIR, "apk_images", "play local.png")
+
+def prepare_custom_buttons():
+    """Places custom wood placard buttons into separated_images for atlas repacking"""
+    mapping = {
+        "b03_top.png": BUTTON_SETTINGS_SRC,
+        "b03_mid.png": BUTTON_AVATARS_SRC,
+        "b03_bot.png": BUTTON_PLAY_LOCAL_SRC,
+    }
+    sep_dirs = [
+        os.path.join(SEPARATED_DIR, "ui_and_menus", "all"),
+        os.path.join(SEPARATED_DIR, "ui_and_menus", "Icons_and_UI")
+    ]
+    slot_w, slot_h = 658, 162
+    for filename, src_path in mapping.items():
+        if os.path.exists(src_path):
+            src_img = Image.open(src_path).convert("RGBA")
+            cropped = src_img.crop(src_img.getbbox())
+            canvas = Image.new("RGBA", (slot_w, slot_h), (0, 0, 0, 0))
+            px = (slot_w - cropped.width) // 2
+            py = (slot_h - cropped.height) // 2
+            canvas.paste(cropped, (px, py), cropped)
+            for d in sep_dirs:
+                if os.path.exists(d):
+                    canvas.save(os.path.join(d, filename), format="PNG")
+            print(f"[+] Prepared custom button UI: {filename} from {os.path.basename(src_path)}")
+
 def build_apk():
     """Builds MiniMilitia_Modded.apk with all modifications"""
     if not os.path.exists(SRC_APK):
@@ -469,6 +514,8 @@ def build_apk():
 
     temp_apk = os.path.join(APP_DIR, "temp_unsigned.apk")
     print(f"\n[1/4] Reading source APK: {os.path.basename(SRC_APK)}")
+
+    prepare_custom_buttons()
 
     with zipfile.ZipFile(SRC_APK, "r") as zin:
         files_to_update = {}
