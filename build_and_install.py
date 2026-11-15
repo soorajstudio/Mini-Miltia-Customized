@@ -1,13 +1,30 @@
 import os, sys, zipfile, io, re, plistlib, subprocess, struct, hashlib, zlib
 from PIL import Image, ImageDraw
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-APP_DIR = os.path.join(BASE_DIR, "mmg app")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # mmg app\ (script lives here)
+APP_DIR  = BASE_DIR                                      # same folder — no more sub-dir
+ROOT_DIR = os.path.dirname(BASE_DIR)                    # mmcg\ parent — APK output goes here
 
-SRC_APK = os.path.join(APP_DIR, "com.appsomniacs.mmc-0-14-4-arm64-v8a-android60.apk")
-TARGET_APK = os.path.join(APP_DIR, "MiniMilitia_Modded.apk")
+SRC_APK    = os.path.join(APP_DIR,  "com.appsomniacs.mmc-0-14-4-arm64-v8a-android60.apk")
+TARGET_APK = os.path.join(ROOT_DIR, "MiniMilitia_Modded.apk")   # output to mmcg\ root
 UBER_SIGNER = os.path.join(APP_DIR, "uber-apk-signer.jar")
-ADB_EXE = r"C:\Users\Sooraj M S\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+def _find_adb():
+    """Auto-detect adb.exe from common Android SDK locations or PATH."""
+    import shutil
+    # 1. Check PATH first
+    found = shutil.which("adb")
+    if found:
+        return found
+    # 2. Search common per-user SDK installs
+    for user_dir in os.listdir(r"C:\Users"):
+        candidate = os.path.join(r"C:\Users", user_dir,
+                                 "AppData", "Local", "Android", "Sdk",
+                                 "platform-tools", "adb.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+ADB_EXE = _find_adb() or r"adb"  # fallback to bare 'adb' (must be on PATH)
 
 SEPARATED_DIR = os.path.join(APP_DIR, "separated_images")
 ICON_SRC = os.path.join(APP_DIR, "apk_images", "app icon.png")
@@ -63,53 +80,97 @@ def generate_icons():
     print(f"[+] Generated {len(icon_files)} launcher icon assets.")
     return icon_files
 
-HOME_BG_SRC = os.path.join(BASE_DIR, "home page bg.png")
+# --- Custom Image Sources (in BASE_DIR / project root) ---
+TITLE_RET_LOGO_SRC = os.path.join(APP_DIR, "apk_images", "title ret logo.png")  # intro centre icon
+TITLE_RET_SRC      = os.path.join(APP_DIR, "apk_images", "title ret.png")       # intro / splash background
+TITLE_RET2_SRC     = os.path.join(APP_DIR, "apk_images", "title ret 2.png")     # home page background
 
 def generate_background_images():
-    """Generates menu background from 'home page bg.png' and blanks overlays"""
-    if not os.path.exists(HOME_BG_SRC):
-        print(f"[-] Home background not found: {HOME_BG_SRC}")
-        return {}
-
-    print(f"[*] Generating home page background from: {os.path.basename(HOME_BG_SRC)}")
-    src_img = Image.open(HOME_BG_SRC).convert("RGBA")
-
+    """
+    Injects all three custom title/background images:
+      - title ret logo.png  -> assets/{density}/title_ret_logo.png  (intro centre PNG icon)
+      - title ret.png       -> assets/{density}/title_ret_new.png   (intro/splash background)
+      - title ret 2.png     -> assets/{density}/bg_new.png          (home page background, BEHIND buttons)
+      - title_ret2_new.png  -> 1x1 transparent                      (home overlay CLEARED so buttons show)
+    """
     bg_files = {}
 
-    # Replace bg_new.png (bottom layer, behind buttons) with custom background
-    bg_resolutions = {
-        "assets/hdr/bg_new.png": (2020, 1338),
-        "assets/hd/bg_new.png": (1010, 669),
-        "assets/sd/bg_new.png": (505, 337),
-    }
-    for path, (w, h) in bg_resolutions.items():
-        resized = src_img.resize((w, h), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        resized.save(buf, format="PNG")
-        bg_files[path] = buf.getvalue()
+    # ── 1. Intro centre logo (title_ret_logo.png) ──────────────────────────
+    if not os.path.exists(TITLE_RET_LOGO_SRC):
+        print(f"[-] title ret logo.png not found: {TITLE_RET_LOGO_SRC}")
+    else:
+        print(f"[*] Setting intro logo from: {os.path.basename(TITLE_RET_LOGO_SRC)}")
+        logo_img = Image.open(TITLE_RET_LOGO_SRC).convert("RGBA")
+        # Original dimensions: HDR 1261x1287, HD 631x644, SD 315x322
+        logo_resolutions = {
+            "assets/hdr/title_ret_logo.png": (1261, 1287),
+            "assets/hd/title_ret_logo.png":  (631,  644),
+            "assets/sd/title_ret_logo.png":  (315,  322),
+        }
+        for path, (w, h) in logo_resolutions.items():
+            resized = logo_img.resize((w, h), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            resized.save(buf, format="PNG")
+            bg_files[path] = buf.getvalue()
+        print(f"    [+] Injected title_ret_logo.png at 3 densities.")
 
-    # Make title_ret2_new.png (overlay on TOP of buttons) fully transparent
-    # so menu buttons remain visible
-    blank_overlay = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-    buf_blank = io.BytesIO()
-    blank_overlay.save(buf_blank, format="PNG")
-    blank_bytes = buf_blank.getvalue()
-    for density in ["hdr", "hd", "sd"]:
-        bg_files[f"assets/{density}/title_ret2_new.png"] = blank_bytes
+    # ── 2. Intro / splash background (title_ret_new.png) ───────────────────
+    if not os.path.exists(TITLE_RET_SRC):
+        print(f"[-] title ret.png not found: {TITLE_RET_SRC}")
+    else:
+        print(f"[*] Setting intro background from: {os.path.basename(TITLE_RET_SRC)}")
+        intro_img = Image.open(TITLE_RET_SRC).convert("RGBA")
+        splash_resolutions = {
+            "assets/hdr/title_ret_new.png": (2272, 1536),
+            "assets/hd/title_ret_new.png":  (1136, 768),
+            "assets/sd/title_ret_new.png":  (568,  384),
+        }
+        for path, (w, h) in splash_resolutions.items():
+            resized = intro_img.resize((w, h), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            resized.save(buf, format="PNG")
+            bg_files[path] = buf.getvalue()
+        print(f"    [+] Injected title_ret_new.png at 3 densities.")
 
-    # Also replace title_ret_new.png (splash background) with custom background
-    splash_resolutions = {
-        "assets/hdr/title_ret_new.png": (2272, 1536),
-        "assets/hd/title_ret_new.png": (1136, 768),
-        "assets/sd/title_ret_new.png": (568, 384),
-    }
-    for path, (w, h) in splash_resolutions.items():
-        resized = src_img.resize((w, h), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        resized.save(buf, format="PNG")
-        bg_files[path] = buf.getvalue()
+    # ── 3 & 4. Home page background ─────────────────────────────────────────
+    # title_ret2_new.png is the ACTUAL rendered background of the home menu.
+    # bg_new.png is a secondary layer that may or may not show.
+    # So we inject the custom background into BOTH to ensure it always shows.
+    if not os.path.exists(TITLE_RET2_SRC):
+        print(f"[-] title ret 2.png not found: {TITLE_RET2_SRC}")
+    else:
+        print(f"[*] Setting home page background from: {os.path.basename(TITLE_RET2_SRC)}")
+        home_img = Image.open(TITLE_RET2_SRC).convert("RGBA")
 
-    print(f"[+] Generated {len(bg_files)} custom background assets.")
+        # Inject into title_ret2_new.png (the main home background layer)
+        title_ret2_resolutions = {
+            "assets/hdr/title_ret2_new.png": (2048, 1536),
+            "assets/hd/title_ret2_new.png":  (1136, 768),
+            "assets/sd/title_ret2_new.png":  (480,  320),
+        }
+        for path, (w, h) in title_ret2_resolutions.items():
+            resized = home_img.resize((w, h), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            resized.save(buf, format="PNG")
+            bg_files[path] = buf.getvalue()
+        print(f"    [+] Injected title_ret2_new.png at 3 densities (main home bg).")
+
+        # Also inject into bg_new.png (secondary background layer)
+        bg_resolutions = {
+            "assets/hdr/bg_new.png": (2020, 1338),
+            "assets/hd/bg_new.png":  (1010, 669),
+            "assets/sd/bg_new.png":  (505,  337),
+        }
+        for path, (w, h) in bg_resolutions.items():
+            resized = home_img.resize((w, h), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            resized.save(buf, format="PNG")
+            bg_files[path] = buf.getvalue()
+        print(f"    [+] Injected bg_new.png at 3 densities (secondary home bg).")
+
+    print("[+] Home background injected — buttons remain visible on top.")
+
+    print(f"[+] Generated {len(bg_files)} total background/logo assets.")
     return bg_files
 
 
@@ -272,6 +333,31 @@ def patch_libcocos2dcpp(z):
     # 10. Set menu background opacity to 100% (255) instead of 35 (0x23)
     so[0x6E4130 : 0x6E4134] = bytes([0xE2, 0x1F, 0x80, 0x52]) # mov w2, #0xff
     print("[+] Set menu background opacity to 100% (255).")
+
+    # 11. Add title_ret2 background behind buttons with zOrder = -1
+    # Originally called: this->addChild(sprite) [zOrder=0, which overlays buttons]
+    # Now calls: this->addChild(sprite, -1) [zOrder=-1, safely behind all UI buttons and avatar]
+    bg_zorder_patch = bytes([
+        0x02, 0x00, 0x80, 0x12, # 0x6e4158: mov  w2, #-1 (zOrder = -1)
+        0xe9, 0xe3, 0x42, 0xf9, # 0x6e415c: ldr  x9, [sp, #0x5c0]
+        0x20, 0x01, 0x40, 0xf9, # 0x6e4160: ldr  x0, [x9]
+        0x00, 0xcc, 0x40, 0xf9, # 0x6e4164: ldr  x0, [x0, #0x198] (CCNode::addChild(CCNode*, int))
+        0x3e, 0xed, 0x40, 0xf9, # 0x6e4168: ldr  x30, [x9, #0x1d8]
+        0xe0, 0x7f, 0x00, 0xf9, # 0x6e416c: str  x0, [sp, #0xf8]
+        0xe0, 0x03, 0x09, 0xaa, # 0x6e4170: mov  x0, x9 (this)
+        0xe1, 0x03, 0x1e, 0xaa, # 0x6e4174: mov  x1, x30 (sprite)
+        0xe8, 0x7f, 0x40, 0xf9, # 0x6e4178: ldr  x8, [sp, #0xf8]
+        0x00, 0x01, 0x3f, 0xd6  # 0x6e417c: blr  x8
+    ])
+    so[0x6E4158 : 0x6E4158 + len(bg_zorder_patch)] = bg_zorder_patch
+    print("[+] Patched title_ret2 background to render at zOrder=-1 (behind all menu buttons).")
+
+    # 12. Remove the duplicate top-right standalone gear SETTINGS button
+    # In MenuLayer::init at 0x6e3c0c: blr x10 calls this->addChild(settingsBtn)
+    # NOPing out this call prevents the top-right button from ever being added to the scene,
+    # leaving ONLY the side menu 'SETTINGS' button with text.
+    so[0x6E3C0C : 0x6E3C10] = bytes([0x1F, 0x20, 0x03, 0xD5]) # nop
+    print("[+] Removed duplicate top-right standalone gear SETTINGS button.")
 
     return {"lib/arm64-v8a/libcocos2dcpp.so": bytes(so)}
 
@@ -466,7 +552,7 @@ def build_apk():
     cmd_sign = [
         "java", "-Xmx128m", "-Xms32m", "-jar", UBER_SIGNER,
         "-a", temp_apk,
-        "-o", APP_DIR,
+        "-o", ROOT_DIR,       # signed APK goes to mmcg\ root
         "--allowResign"
     ]
     res = subprocess.run(cmd_sign, capture_output=True, text=True)
@@ -474,7 +560,7 @@ def build_apk():
         print(f"[-] Signer failed: {res.stderr}")
         return False
 
-    signed_candidate = os.path.join(APP_DIR, "temp_unsigned-aligned-debugSigned.apk")
+    signed_candidate = os.path.join(ROOT_DIR, "temp_unsigned-aligned-debugSigned.apk")
     if os.path.exists(signed_candidate):
         if os.path.exists(TARGET_APK):
             os.remove(TARGET_APK)
@@ -493,6 +579,16 @@ def build_apk():
 def install_and_launch_phone():
     """Installs MiniMilitia_Modded.apk to the connected phone and launches it"""
     print(f"\n[4/4] Checking connected phone via ADB...")
+
+    # Verify adb is actually reachable before attempting anything
+    import shutil
+    adb_resolved = ADB_EXE if (ADB_EXE != "adb" or shutil.which("adb")) else None
+    if not adb_resolved or not os.path.isfile(adb_resolved) and shutil.which(adb_resolved) is None:
+        print("[-] ADB not found. Skipping phone install step.")
+        print(f"    APK is ready at: {TARGET_APK}")
+        print("    Transfer it manually to your device, or install Android SDK platform-tools.")
+        return False
+
     res_devices = subprocess.run([ADB_EXE, "devices"], capture_output=True, text=True)
     lines = [l.strip() for l in res_devices.stdout.strip().split("\n")[1:] if l.strip()]
 
